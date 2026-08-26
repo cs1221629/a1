@@ -141,6 +141,26 @@ full harness pass that CI runs on every push
 conformance freeze (48 hours before the deadline — see
 `docs/SUBMISSION_INTERFACE.md`).
 
+## Inspecting a query
+
+Use the query tracer to see tokenisation, document frequencies, postings,
+Boolean matches, and VSM/BM25 rankings:
+
+```bash
+python scripts/trace_query.py "coffee caffeine" -k 5
+```
+
+To tune BM25 on the released dev set without editing `submission/` files:
+
+```bash
+python scripts/tune_bm25.py \
+  --corpus data/full/corpus.jsonl \
+  --queries data/full/queries_dev.tsv \
+  --qrels data/full/qrels_dev.txt
+```
+
+The complete sweep is written to `runs/bm25_tuning.json`.
+
 ## Repository layout
 
 ```

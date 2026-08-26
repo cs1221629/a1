@@ -27,9 +27,14 @@ controls document-length normalisation strength. Both must be exposed as
 parameters, not hard-coded — you need to sweep them for your report
 (assignment Section 8, "parameter search procedure for k1, b").
 """
+import math
+import heapq
 from typing import List, Tuple
 
-from submission.indexer import InvertedIndex
+from submission.indexer import InvertedIndex, tokenize
+
+_INDEX: InvertedIndex = None
+_IDF_CACHE = {}
 
 
 def build(index: InvertedIndex) -> None:
@@ -43,10 +48,53 @@ def build(index: InvertedIndex) -> None:
     build/load boundary too, write it out via InvertedIndex.save() instead
     (it then counts toward your index-size score) and rebuild the cache
     here from the loaded index."""
-    raise NotImplementedError
+    global _INDEX, _IDF_CACHE
+    _INDEX = index
+    _IDF_CACHE = {}
+    
+    # Precompute IDF for all terms in the index
+    for term, encoded_postings in index.postings.items():
+        df = len(encoded_postings) // 2
+        idf = math.log((index.N - df + 0.5) / (df + 0.5) + 1.0)
+        _IDF_CACHE[term] = idf
 
 
 def score(query: str, k: int, k1: float = 1.2, b: float = 0.75) -> List[Tuple[str, float]]:
     """Return up to k (doc_id, score) pairs for `query`, BM25-ranked,
     highest score first."""
-    raise NotImplementedError
+    global _INDEX, _IDF_CACHE
+    if _INDEX is None:
+        raise RuntimeError("bm25.build(index) must be called before score().")
+    if k <= 0 or _INDEX.N == 0 or _INDEX.avg_doc_len == 0.0:
+        return []
+    tokens = tokenize(query)
+    
+    doc_scores = {}
+    
+    for term in tokens:
+        if term not in _INDEX.postings:
+            continue
+            
+        idf = _IDF_CACHE.get(term, 0.0)
+        
+        # Decode postings
+        encoded = _INDEX.postings[term]
+        doc_id = 0
+        for i in range(0, len(encoded), 2):
+            doc_id += encoded[i]
+            tf = encoded[i+1]
+            
+            # Compute BM25 term weight
+            doc_len = _INDEX.doc_len[doc_id]
+            numerator = tf * (k1 + 1)
+            denominator = tf + k1 * (1 - b + b * (doc_len / _INDEX.avg_doc_len))
+            
+            weight = idf * (numerator / denominator)
+            
+            if doc_id not in doc_scores:
+                doc_scores[doc_id] = 0.0
+            doc_scores[doc_id] += weight
+            
+    # O(C log k), not O(C log C), for C matching candidate documents.
+    top_docs = heapq.nsmallest(k, doc_scores.items(), key=lambda x: (-x[1], x[0]))
+    return [(_INDEX.doc_id_map[doc_id], float(sc)) for doc_id, sc in top_docs]

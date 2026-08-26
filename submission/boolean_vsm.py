@@ -27,33 +27,126 @@ Two independent pieces to implement:
 Both pieces should read from the same InvertedIndex you build in
 indexer.py.
 """
+import math
+import heapq
 from typing import List, Tuple
 
-from submission.indexer import InvertedIndex
+from submission.indexer import InvertedIndex, tokenize
 
+_INDEX: InvertedIndex = None
+_IDF_CACHE = {}
+_DOC_NORMS = {}
 
 def build(index: InvertedIndex) -> None:
     """Optional: precompute anything VSM-specific (e.g. document vector
     norms) from the InvertedIndex built in indexer.py.
-
-    Call this from retrieve.load_index(), not retrieve.build_index() —
-    the harness runs those two in separate processes, so any cache this
-    creates only needs to exist in the process that also calls
-    retrieve(). If you want a precomputed cache to persist across the
-    build/load boundary too, write it out via InvertedIndex.save() instead
-    (it then counts toward your index-size score) and rebuild the cache
-    here from the loaded index."""
-    raise NotImplementedError
+    """
+    global _INDEX, _IDF_CACHE, _DOC_NORMS
+    _INDEX = index
+    _IDF_CACHE = {}
+    _DOC_NORMS = {}
+    
+    # IDF and tf-idf norms
+    for term, encoded in index.postings.items():
+        df = len(encoded) // 2
+        idf = math.log(index.N / df)
+        _IDF_CACHE[term] = idf
+        
+        doc_id = 0
+        for i in range(0, len(encoded), 2):
+            doc_id += encoded[i]
+            tf = encoded[i+1]
+            w = tf * idf
+            if doc_id not in _DOC_NORMS:
+                _DOC_NORMS[doc_id] = 0.0
+            _DOC_NORMS[doc_id] += w * w
+            
+    for d in _DOC_NORMS:
+        _DOC_NORMS[d] = math.sqrt(_DOC_NORMS[d])
 
 
 def boolean_search(query: str, mode: str = "and") -> List[str]:
     """Return the (unranked) list of doc_ids matching `query`, treating it
     as a conjunction (`mode="and"`) or disjunction (`mode="or"`) of its
     terms."""
-    raise NotImplementedError
+    global _INDEX
+    if _INDEX is None:
+        raise RuntimeError("boolean_vsm.build(index) must be called before searching.")
+    if mode not in {"and", "or"}:
+        raise ValueError("mode must be either 'and' or 'or'")
+    tokens = tokenize(query)
+    if not tokens:
+        return []
+        
+    doc_sets = []
+    for term in tokens:
+        if term not in _INDEX.postings:
+            doc_sets.append(set())
+            continue
+        encoded = _INDEX.postings[term]
+        d_set = set()
+        doc_id = 0
+        for i in range(0, len(encoded), 2):
+            doc_id += encoded[i]
+            d_set.add(doc_id)
+        doc_sets.append(d_set)
+        
+    if mode == "and":
+        res = doc_sets[0]
+        for s in doc_sets[1:]:
+            res = res.intersection(s)
+    else:
+        res = doc_sets[0]
+        for s in doc_sets[1:]:
+            res = res.union(s)
+            
+    return [_INDEX.doc_id_map[d] for d in sorted(res)]
 
 
 def vsm_score(query: str, k: int) -> List[Tuple[str, float]]:
     """Return up to k (doc_id, score) pairs for `query`, ranked by
     TF-IDF cosine similarity, highest score first."""
-    raise NotImplementedError
+    global _INDEX, _IDF_CACHE, _DOC_NORMS
+    if _INDEX is None or k <= 0:
+        return []
+    tokens = tokenize(query)
+    if not tokens:
+        return []
+        
+    # query vector tf
+    q_tf = {}
+    for t in tokens:
+        q_tf[t] = q_tf.get(t, 0) + 1
+        
+    q_norm = 0.0
+    q_weights = {}
+    for t, tf in q_tf.items():
+        if t in _IDF_CACHE:
+            w = tf * _IDF_CACHE[t]
+            q_weights[t] = w
+            q_norm += w * w
+            
+    if q_norm == 0.0:
+        return []
+    q_norm = math.sqrt(q_norm)
+    
+    doc_scores = {}
+    for t, q_w in q_weights.items():
+        encoded = _INDEX.postings[t]
+        doc_id = 0
+        for i in range(0, len(encoded), 2):
+            doc_id += encoded[i]
+            d_tf = encoded[i+1]
+            d_w = d_tf * _IDF_CACHE[t]
+            
+            if doc_id not in doc_scores:
+                doc_scores[doc_id] = 0.0
+            doc_scores[doc_id] += q_w * d_w
+            
+    res = []
+    for doc_id, dot_prod in doc_scores.items():
+        sim = dot_prod / (q_norm * _DOC_NORMS[doc_id])
+        res.append((doc_id, sim))
+        
+    top_docs = heapq.nsmallest(k, res, key=lambda x: (-x[1], x[0]))
+    return [(_INDEX.doc_id_map[d], float(s)) for d, s in top_docs]

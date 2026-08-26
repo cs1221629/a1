@@ -1,5 +1,6 @@
 # Core (needed to run the harness and the shipped trivial baseline)
 pytest>=7.0
+nltk>=3.8
 
 # Available if you want to compile part of your submission as a C/C++
 # extension (e.g. via Cython) for the efficiency / index-size leaderboard
