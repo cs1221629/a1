@@ -145,7 +145,10 @@ def vsm_score(query: str, k: int) -> List[Tuple[str, float]]:
             
     res = []
     for doc_id, dot_prod in doc_scores.items():
-        sim = dot_prod / (q_norm * _DOC_NORMS[doc_id])
+        doc_norm = _DOC_NORMS[doc_id]
+        if doc_norm == 0.0:
+            continue
+        sim = dot_prod / (q_norm * doc_norm)
         res.append((doc_id, sim))
         
     top_docs = heapq.nsmallest(k, res, key=lambda x: (-x[1], x[0]))

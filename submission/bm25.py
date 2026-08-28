@@ -35,6 +35,8 @@ from submission.indexer import InvertedIndex, tokenize
 
 _INDEX: InvertedIndex = None
 _IDF_CACHE = {}
+_NORMALIZERS = []
+_NORMALIZER_PARAMS = None
 
 
 def build(index: InvertedIndex) -> None:
@@ -48,9 +50,11 @@ def build(index: InvertedIndex) -> None:
     build/load boundary too, write it out via InvertedIndex.save() instead
     (it then counts toward your index-size score) and rebuild the cache
     here from the loaded index."""
-    global _INDEX, _IDF_CACHE
+    global _INDEX, _IDF_CACHE, _NORMALIZERS, _NORMALIZER_PARAMS
     _INDEX = index
     _IDF_CACHE = {}
+    _NORMALIZERS = []
+    _NORMALIZER_PARAMS = None
     
     # Precompute IDF for all terms in the index
     for term, encoded_postings in index.postings.items():
@@ -59,7 +63,23 @@ def build(index: InvertedIndex) -> None:
         _IDF_CACHE[term] = idf
 
 
-def score(query: str, k: int, k1: float = 1.2, b: float = 0.75) -> List[Tuple[str, float]]:
+def configure(k1: float, b: float) -> None:
+    """Precompute document-length normalization for one BM25 parameter set."""
+    global _NORMALIZERS, _NORMALIZER_PARAMS
+    if _INDEX is None:
+        raise RuntimeError("bm25.build(index) must be called before configure().")
+    params = (k1, b)
+    if _NORMALIZER_PARAMS == params:
+        return
+    _NORMALIZERS = [
+        k1 * (1.0 - b + b * doc_len_ratio)
+        for doc_len_ratio in _INDEX.doc_len_ratio
+    ]
+    _NORMALIZER_PARAMS = params
+
+
+def score(query: str, k: int, k1: float = 1.2, b: float = 0.75,
+          delta: float = 0.0) -> List[Tuple[str, float]]:
     """Return up to k (doc_id, score) pairs for `query`, BM25-ranked,
     highest score first."""
     global _INDEX, _IDF_CACHE
@@ -67,6 +87,9 @@ def score(query: str, k: int, k1: float = 1.2, b: float = 0.75) -> List[Tuple[st
         raise RuntimeError("bm25.build(index) must be called before score().")
     if k <= 0 or _INDEX.N == 0 or _INDEX.avg_doc_len == 0.0:
         return []
+    if delta < 0.0:
+        raise ValueError("delta must be non-negative")
+    configure(k1, b)
     tokens = tokenize(query)
     
     doc_scores = {}
@@ -85,11 +108,11 @@ def score(query: str, k: int, k1: float = 1.2, b: float = 0.75) -> List[Tuple[st
             tf = encoded[i+1]
             
             # Compute BM25 term weight
-            doc_len = _INDEX.doc_len[doc_id]
             numerator = tf * (k1 + 1)
-            denominator = tf + k1 * (1 - b + b * (doc_len / _INDEX.avg_doc_len))
-            
-            weight = idf * (numerator / denominator)
+            denominator = tf + _NORMALIZERS[doc_id]
+
+            # BM25+; delta=0.0 is ordinary BM25.
+            weight = idf * (delta + numerator / denominator)
             
             if doc_id not in doc_scores:
                 doc_scores[doc_id] = 0.0

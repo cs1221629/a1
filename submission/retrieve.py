@@ -45,7 +45,7 @@ import json
 import os
 from typing import List, Optional, Tuple
 
-from submission.corpus_utils import load_corpus
+from submission.corpus_utils import iter_corpus
 from submission import bm25, boolean_vsm
 from submission.indexer import InvertedIndex
 
@@ -55,14 +55,14 @@ _INDEX: Optional[InvertedIndex] = None
 # Keep these at module scope so the final entry's choice is explicit.
 BM25_K1 = 2.0
 BM25_B = 0.6
+BM25_DELTA = 0.0
 
 def build_index(corpus_path: str, index_dir: str) -> None:
     """Load the corpus, build whatever index structures you need, and
     write everything retrieve() will need into `index_dir`.
     """
-    corpus = load_corpus(corpus_path)
     index = InvertedIndex()
-    index.build(corpus)
+    index.build(iter_corpus(corpus_path))
     index.save(index_dir)
 
 
@@ -74,6 +74,7 @@ def load_index(index_dir: str) -> None:
     global _INDEX
     _INDEX = InvertedIndex.load(index_dir)
     bm25.build(_INDEX)
+    bm25.configure(BM25_K1, BM25_B)
     boolean_vsm.build(_INDEX)
 
 
@@ -88,4 +89,4 @@ def retrieve(query: str, k: int = 10) -> List[Tuple[str, float]]:
             "manually, do the same."
         )
 
-    return bm25.score(query, k, k1=BM25_K1, b=BM25_B)
+    return bm25.score(query, k, k1=BM25_K1, b=BM25_B, delta=BM25_DELTA)

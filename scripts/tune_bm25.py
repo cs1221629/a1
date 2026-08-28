@@ -32,25 +32,34 @@ def main() -> None:
         default=[0.0, 0.25, 0.5, 0.75, 1.0],
         help="One or more b values to evaluate.",
     )
+    parser.add_argument(
+        "--delta-values", type=float, nargs="+", default=[0.0],
+        help="One or more BM25+ delta values; 0.0 evaluates ordinary BM25.",
+    )
     args = parser.parse_args()
 
     index = InvertedIndex()
     index.build(load_corpus(args.corpus))
     bm25.build(index)
+
     queries = read_queries(args.queries)
     qrels = read_qrels(args.qrels)
     results = []
-    for k1, b in itertools.product(args.k1_values, args.b_values):
-        run = {qid: bm25.score(query, 10, k1=k1, b=b) for qid, query in queries}
+
+    for k1, b, delta in itertools.product(args.k1_values, args.b_values, args.delta_values):
+        run = {
+            qid: bm25.score(query, 10, k1=k1, b=b, delta=delta)
+            for qid, query in queries
+        }
         metrics = evaluate_run(run, qrels, k=10)["aggregate"]
-        results.append({"k1": k1, "b": b, **metrics})
+        results.append({"k1": k1, "b": b, "delta": delta, **metrics})
 
     results.sort(key=lambda row: (-row["ndcg@10"], -row["map@10"], row["k1"], row["b"]))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(results, indent=2), encoding="utf-8")
     print("Top settings (ranked by nDCG@10, then MAP@10):")
     for row in results[:10]:
-        print(f"k1={row['k1']:.1f}, b={row['b']:.2f}: "
+        print(f"k1={row['k1']:.1f}, b={row['b']:.2f}, delta={row['delta']:.2f}: "
               f"nDCG@10={row['ndcg@10']:.4f}, MAP@10={row['map@10']:.4f}")
     print(f"Full sweep written to {args.out}")
 

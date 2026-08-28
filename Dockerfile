@@ -2,7 +2,7 @@
 # identically regardless of local setup (assignment Section 5,
 # "Containerisation"). Course staff run every submission through this
 # same image at grading time.
-FROM python:3.11-slim
+FROM python:3.12.3-slim
 
 WORKDIR /repo
 

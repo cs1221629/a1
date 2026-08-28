@@ -28,10 +28,12 @@ assignments — see the `save()` docstring for concrete starting points.
 """
 import re
 from functools import lru_cache
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 import os
 import pickle
 import zlib
+import array
+import struct
 from nltk.stem import PorterStemmer
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -71,48 +73,59 @@ class InvertedIndex:
     def __init__(self):
         # We will use integer doc IDs internally for efficiency.
         self.doc_id_map: List[str] = [] # int -> str
-        self.doc_len: List[int] = []    # int -> length
-        
-        # self.postings maps a term to a flat list of integers:
+        self.doc_len: array.array = array.array('I')  # unsigned int
+
+        # self.postings maps a term to an array of integers:
         # [doc_id0, tf0, delta_doc_id1, tf1, delta_doc_id2, tf2, ...]
-        self.postings: Dict[str, List[int]] = {}
-        
+        self.postings: Dict[str, array.array] = {}
+
         self.N: int = 0
         self.avg_doc_len: float = 0.0
+        # Pre-computed doc_len[i] / avg_doc_len for BM25 speedup
+        self.doc_len_ratio: array.array = array.array('f')
 
-    def build(self, corpus: List[Tuple[str, str]]) -> None:
+    def build(self, corpus: Iterable[Tuple[str, str]]) -> None:
         """corpus: list of (doc_id, text) pairs, e.g. from
         submission.corpus_utils.load_corpus().
         """
         # Permit reuse of an index object without leaking a previous build.
         self.doc_id_map = []
-        self.doc_len = []
+        doc_lens = []
         self.postings = {}
-        self.N = len(corpus)
+        self.N = 0
         total_len = 0
-        
+
         # Temporary structure for building postings: term -> {doc_id_int: tf}
         temp_postings: Dict[str, Dict[int, int]] = {}
-        
+
         for doc_idx, (doc_id, text) in enumerate(corpus):
             self.doc_id_map.append(doc_id)
+            self.N += 1
             tokens = tokenize(text)
             doc_length = len(tokens)
-            self.doc_len.append(doc_length)
+            doc_lens.append(doc_length)
             total_len += doc_length
-            
+
             for token in tokens:
                 if token not in temp_postings:
                     temp_postings[token] = {}
                 if doc_idx not in temp_postings[token]:
                     temp_postings[token][doc_idx] = 0
                 temp_postings[token][doc_idx] += 1
-                
+
         self.avg_doc_len = total_len / self.N if self.N > 0 else 0.0
-        
-        # Convert to delta-encoded lists
+        self.doc_len = array.array('I', doc_lens)
+
+        # Pre-compute doc_len / avg_doc_len for BM25 scoring speed
+        if self.avg_doc_len > 0:
+            self.doc_len_ratio = array.array('f',
+                (dl / self.avg_doc_len for dl in doc_lens))
+        else:
+            self.doc_len_ratio = array.array('f', [0.0] * self.N)
+
+        # Convert to delta-encoded arrays
         for term, term_docs in temp_postings.items():
-            encoded = []
+            encoded = array.array('I')
             last_doc_id = 0
             # sort by doc_id to enable delta encoding
             for doc_id_int in sorted(term_docs.keys()):
@@ -137,14 +150,18 @@ class InvertedIndex:
         """
         os.makedirs(index_dir, exist_ok=True)
         path = os.path.join(index_dir, "index.bin")
+        # Convert array.array postings to bytes for more compact pickle
+        postings_bytes = {term: _uint_array_to_bytes(arr)
+                          for term, arr in self.postings.items()}
         data = {
             "doc_id_map": self.doc_id_map,
-            "doc_len": self.doc_len,
-            "postings": self.postings,
+            "doc_len": _uint_array_to_bytes(self.doc_len),
+            "postings": postings_bytes,
             "N": self.N,
             "avg_doc_len": self.avg_doc_len
         }
-        compressed = zlib.compress(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+        compressed = zlib.compress(
+            pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL), level=6)
         with open(path, "wb") as f:
             f.write(compressed)
 
@@ -157,13 +174,37 @@ class InvertedIndex:
         path = os.path.join(index_dir, "index.bin")
         with open(path, "rb") as f:
             compressed = f.read()
-            
+
         data = pickle.loads(zlib.decompress(compressed))
         index = cls()
         index.doc_id_map = data["doc_id_map"]
-        index.doc_len = data["doc_len"]
-        index.postings = data["postings"]
+        index.doc_len = _bytes_to_uint_array(data["doc_len"])
+        # Reconstruct postings arrays from bytes
+        index.postings = {}
+        for term, raw in data["postings"].items():
+            index.postings[term] = _bytes_to_uint_array(raw)
         index.N = data["N"]
         index.avg_doc_len = data["avg_doc_len"]
+        # Recompute doc_len_ratio (cheap, avoids persisting it)
+        if index.avg_doc_len > 0:
+            index.doc_len_ratio = array.array('f',
+                (dl / index.avg_doc_len for dl in index.doc_len))
+        else:
+            index.doc_len_ratio = array.array('f', [0.0] * index.N)
         return index
+
+
+def _uint_array_to_bytes(values: array.array) -> bytes:
+    """Encode unsigned integers with a fixed four-byte little-endian format."""
+    encoded = bytearray(len(values) * 4)
+    for offset, value in enumerate(values):
+        struct.pack_into("<I", encoded, offset * 4, value)
+    return bytes(encoded)
+
+
+def _bytes_to_uint_array(raw: bytes) -> array.array:
+    """Decode the portable uint32 format into the index's native array type."""
+    if len(raw) % 4:
+        raise ValueError("corrupt index: uint32 data has an invalid length")
+    return array.array("I", (value[0] for value in struct.iter_unpack("<I", raw)))
 
