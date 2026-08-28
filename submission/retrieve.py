@@ -53,8 +53,8 @@ _INDEX: Optional[InvertedIndex] = None
 
 # Selected by scripts/tune_bm25.py on the released development topics.
 # Keep these at module scope so the final entry's choice is explicit.
-BM25_K1 = 1.8
-BM25_B = 0.5
+BM25_K1 = 2.0
+BM25_B = 0.6
 
 def build_index(corpus_path: str, index_dir: str) -> None:
     """Load the corpus, build whatever index structures you need, and

@@ -22,6 +22,16 @@ def main() -> None:
     parser.add_argument("--queries", default="data/toy/queries_dev.tsv")
     parser.add_argument("--qrels", default="data/toy/qrels_dev.txt")
     parser.add_argument("--out", default="runs/bm25_tuning.json")
+    parser.add_argument(
+        "--k1-values", type=float, nargs="+",
+        default=[0.6, 0.9, 1.2, 1.5, 1.8, 2.1],
+        help="One or more k1 values to evaluate.",
+    )
+    parser.add_argument(
+        "--b-values", type=float, nargs="+",
+        default=[0.0, 0.25, 0.5, 0.75, 1.0],
+        help="One or more b values to evaluate.",
+    )
     args = parser.parse_args()
 
     index = InvertedIndex()
@@ -30,8 +40,7 @@ def main() -> None:
     queries = read_queries(args.queries)
     qrels = read_qrels(args.qrels)
     results = []
-    for k1, b in itertools.product([0.6, 0.9, 1.2, 1.5, 1.8, 2.1],
-                                   [0.0, 0.25, 0.5, 0.75, 1.0]):
+    for k1, b in itertools.product(args.k1_values, args.b_values):
         run = {qid: bm25.score(query, 10, k1=k1, b=b) for qid, query in queries}
         metrics = evaluate_run(run, qrels, k=10)["aggregate"]
         results.append({"k1": k1, "b": b, **metrics})
