@@ -14,13 +14,6 @@ from submission.corpus_utils import load_corpus
 from submission.indexer import InvertedIndex, tokenize
 
 
-def decode(encoded):
-    doc_num = 0
-    for offset in range(0, len(encoded), 2):
-        doc_num += encoded[offset]
-        yield doc_num, encoded[offset + 1]
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("query")
@@ -45,8 +38,9 @@ def main() -> None:
             print(f"{term!r}: not in the index")
             continue
         idf = math.log((index.N - df + 0.5) / (df + 0.5) + 1.0)
+        docs, tfs = index.postings_for(term)
         rows = [f"{index.doc_id_map[d]}(tf={tf}, len={index.doc_len[d]})"
-                for d, tf in decode(index.postings[term])]
+                for d, tf in zip(docs, tfs)]
         print(f"{term!r}: qtf={qtf}, df={df}, BM25 idf={idf:.4f}")
         print("  postings: " + ", ".join(rows))
 

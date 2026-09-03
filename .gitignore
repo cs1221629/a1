@@ -8,3 +8,10 @@ data/full/
 *.aux
 *.out
 *.log
+
+# Compiled extension build products (submission/setup.py builds these
+# in the Docker/CI image; the .pyx is the source of truth).
+submission/_tokenizer.cpp
+submission/build/
+*.so
+*.pyd

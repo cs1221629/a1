@@ -2,6 +2,10 @@
 pytest>=7.0
 nltk>=3.8
 
+# The index and both scorers are built on numpy arrays (CSR-style postings,
+# vectorized BM25/VSM scoring). Explicitly permitted by the assignment.
+numpy>=1.26
+
 # Available if you want to compile part of your submission as a C/C++
 # extension (e.g. via Cython) for the efficiency / index-size leaderboard
 # components — see docs/SUBMISSION_INTERFACE.md, "Compiled extensions".

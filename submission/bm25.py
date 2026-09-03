@@ -26,22 +26,30 @@ k1 (typically 1.2-2.0) controls term-frequency saturation; b (in [0, 1])
 controls document-length normalisation strength. Both must be exposed as
 parameters, not hard-coded — you need to sweep them for your report
 (assignment Section 8, "parameter search procedure for k1, b").
+
+Scoring is vectorized with numpy against the CSR-style postings in
+indexer.py: for each query term we take that term's postings slice and do
+`acc[docs] += idf * weight` over the whole slice at once, instead of
+walking postings and updating a Python dict per document. `configure(k1,
+b)` precomputes the per-posting weight `tf*(k1+1) / (tf + K[doc])` once
+per (k1, b) pair, so a query costs one gather + scaled add per term.
 """
-import math
-import heapq
+import numpy as np
 from typing import List, Tuple
 
 from submission.indexer import InvertedIndex, tokenize
+from submission.ranking_utils import CandidateSet, top_k
 
 _INDEX: InvertedIndex = None
-_IDF_CACHE = {}
-_NORMALIZERS = []
+_IDF: np.ndarray = None          # float32, indexed by term ordinal
+_WEIGHT: np.ndarray = None       # float32, per posting: tf*(k1+1)/(tf+K[doc])
 _NORMALIZER_PARAMS = None
+_ACC: np.ndarray = None          # persistent float32 accumulator, length N
+_CANDS = None                    # ranking_utils.CandidateSet, length N
 
 
 def build(index: InvertedIndex) -> None:
-    """Optional: precompute anything BM25-specific (e.g. cached IDF values
-    per term) from the InvertedIndex built in indexer.py.
+    """Precompute per-term IDF from the InvertedIndex built in indexer.py.
 
     Call this from retrieve.load_index(), not retrieve.build_index() —
     the harness runs those two in separate processes, so any cache this
@@ -50,31 +58,29 @@ def build(index: InvertedIndex) -> None:
     build/load boundary too, write it out via InvertedIndex.save() instead
     (it then counts toward your index-size score) and rebuild the cache
     here from the loaded index."""
-    global _INDEX, _IDF_CACHE, _NORMALIZERS, _NORMALIZER_PARAMS
+    global _INDEX, _IDF, _WEIGHT, _NORMALIZER_PARAMS, _ACC, _CANDS
     _INDEX = index
-    _IDF_CACHE = {}
-    _NORMALIZERS = []
+    _WEIGHT = None
     _NORMALIZER_PARAMS = None
-    
-    # Precompute IDF for all terms in the index
-    for term, encoded_postings in index.postings.items():
-        df = len(encoded_postings) // 2
-        idf = math.log((index.N - df + 0.5) / (df + 0.5) + 1.0)
-        _IDF_CACHE[term] = idf
+    _CANDS = CandidateSet(index.N)
+
+    df = (index.post_off[1:] - index.post_off[:-1]).astype(np.float64)
+    _IDF = np.log((index.N - df + 0.5) / (df + 0.5) + 1.0).astype(np.float32)
+    _ACC = np.zeros(index.N, dtype=np.float32)
 
 
 def configure(k1: float, b: float) -> None:
-    """Precompute document-length normalization for one BM25 parameter set."""
-    global _NORMALIZERS, _NORMALIZER_PARAMS
+    """Precompute the per-posting BM25 weight for one (k1, b) parameter set."""
+    global _WEIGHT, _NORMALIZER_PARAMS
     if _INDEX is None:
         raise RuntimeError("bm25.build(index) must be called before configure().")
     params = (k1, b)
     if _NORMALIZER_PARAMS == params:
         return
-    _NORMALIZERS = [
-        k1 * (1.0 - b + b * doc_len_ratio)
-        for doc_len_ratio in _INDEX.doc_len_ratio
-    ]
+    # K depends only on the document and (k1, b), never on the query term.
+    K = k1 * (1.0 - b + b * _INDEX.doc_len_ratio.astype(np.float64))
+    tf = _INDEX.post_tf.astype(np.float64)
+    _WEIGHT = (tf * (k1 + 1.0) / (tf + K[_INDEX.post_doc])).astype(np.float32)
     _NORMALIZER_PARAMS = params
 
 
@@ -82,7 +88,7 @@ def score(query: str, k: int, k1: float = 1.2, b: float = 0.75,
           delta: float = 0.0) -> List[Tuple[str, float]]:
     """Return up to k (doc_id, score) pairs for `query`, BM25-ranked,
     highest score first."""
-    global _INDEX, _IDF_CACHE
+    global _INDEX, _IDF, _WEIGHT, _ACC, _CANDS
     if _INDEX is None:
         raise RuntimeError("bm25.build(index) must be called before score().")
     if k <= 0 or _INDEX.N == 0 or _INDEX.avg_doc_len == 0.0:
@@ -91,33 +97,48 @@ def score(query: str, k: int, k1: float = 1.2, b: float = 0.75,
         raise ValueError("delta must be non-negative")
     configure(k1, b)
     tokens = tokenize(query)
-    
-    doc_scores = {}
-    
-    for term in tokens:
-        if term not in _INDEX.postings:
-            continue
-            
-        idf = _IDF_CACHE.get(term, 0.0)
-        
-        # Decode postings
-        encoded = _INDEX.postings[term]
-        doc_id = 0
-        for i in range(0, len(encoded), 2):
-            doc_id += encoded[i]
-            tf = encoded[i+1]
-            
-            # Compute BM25 term weight
-            numerator = tf * (k1 + 1)
-            denominator = tf + _NORMALIZERS[doc_id]
+    if not tokens:
+        return []
 
-            # BM25+; delta=0.0 is ordinary BM25.
-            weight = idf * (delta + numerator / denominator)
-            
-            if doc_id not in doc_scores:
-                doc_scores[doc_id] = 0.0
-            doc_scores[doc_id] += weight
-            
-    # O(C log k), not O(C log C), for C matching candidate documents.
-    top_docs = heapq.nsmallest(k, doc_scores.items(), key=lambda x: (-x[1], x[0]))
-    return [(_INDEX.doc_id_map[doc_id], float(sc)) for doc_id, sc in top_docs]
+    touched = False
+    for term in tokens:
+        tid = _INDEX.term_ids.get(term)
+        if tid is None:
+            continue
+        lo = int(_INDEX.post_off[tid])
+        hi = int(_INDEX.post_off[tid + 1])
+        if hi <= lo:
+            continue
+        docs = _INDEX.post_doc[lo:hi]
+        # BM25+; delta=0.0 is ordinary BM25. Ordinary BM25 is the shipped
+        # configuration, and `delta + _WEIGHT[lo:hi]` would materialise a
+        # second full-length temporary per query term purely to add zero,
+        # so that case takes the branch without it.
+        # Doc ids are unique within a term's posting block, so a plain
+        # fancy-index += is correct here (no repeated-index collisions).
+        idf = float(_IDF[tid])
+        if delta:
+            _ACC[docs] += idf * (delta + _WEIGHT[lo:hi])
+        else:
+            _ACC[docs] += idf * _WEIGHT[lo:hi]
+        _CANDS.add(docs)
+        touched = True
+
+    if not touched:
+        return []
+
+    candidates = _CANDS.collect()
+    scores = _ACC[candidates]
+
+    # Deterministic tie-break (score descending, then doc id ascending),
+    # including for documents tied exactly at the k-th score — see
+    # ranking_utils.top_k for why a bare argpartition is not enough.
+    top_docs, top_scores = top_k(candidates, scores, k)
+
+    _ACC[candidates] = 0.0
+    _CANDS.clear(candidates)
+
+    return [
+        (_INDEX.doc_id_map[int(doc)], float(sc))
+        for doc, sc in zip(top_docs, top_scores)
+    ]

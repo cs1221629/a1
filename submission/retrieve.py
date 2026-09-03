@@ -46,16 +46,35 @@ import os
 from typing import List, Optional, Tuple
 
 from submission.corpus_utils import iter_corpus
-from submission import bm25, boolean_vsm
+from submission import bm25, boolean_vsm, custom_scorer
 from submission.indexer import InvertedIndex
 
 _INDEX: Optional[InvertedIndex] = None
 
-# Selected by scripts/tune_bm25.py on the released development topics.
-# Keep these at module scope so the final entry's choice is explicit.
-BM25_K1 = 2.0
+# All four constants below were selected by scripts/tune.py using
+# fold-separated cross-validation over the 50 development topics, never by
+# taking the argmax over all 50 — with only 50 topics the argmax over a
+# large grid is worth about +0.017 nDCG of pure optimism (measured; see
+# runs/tune_bm25.json), which is more than the spread between the top
+# configurations. Keep them at module scope so the entry's choices are
+# explicit and reproducible.
+
+# k1 was retuned *after* the blend below was added, which matters: a 440-point
+# k1/b/delta grid over plain BM25 had preferred 2.0, but the blend shifts the
+# optimum. All five folds independently picked 1.5 without seeing their
+# held-out topics, for an honest fold-separated gain of +0.0054 nDCG@10 at
+# exactly 0.0000 optimism -- the cleanest signal any sweep in this project
+# produced. b and lambda were then re-swept at k1=1.5 and both were already
+# optimal: selecting any other value scored *worse* on held-out folds.
+BM25_K1 = 1.5
 BM25_B = 0.6
 BM25_DELTA = 0.0
+
+# Blend weight for custom_scorer: score = lam*norm(BM25) + (1-lam)*norm(cosine).
+# lam=1.0 is exactly plain BM25. Every value in [0.7, 0.9] beat plain BM25
+# on 4 of 5 folds (runs/tune_blend.json); 0.8 is the centre of that
+# plateau, worth about +0.014 nDCG@10 over BM25 alone.
+BLEND_LAMBDA = 0.8
 
 def build_index(corpus_path: str, index_dir: str) -> None:
     """Load the corpus, build whatever index structures you need, and
@@ -76,6 +95,13 @@ def load_index(index_dir: str) -> None:
     bm25.build(_INDEX)
     bm25.configure(BM25_K1, BM25_B)
     boolean_vsm.build(_INDEX)
+    custom_scorer.build(_INDEX)
+
+    # Warm up before the harness starts timing queries. The harness issues
+    # no warm-up query and averages every latency it measures, so the first
+    # query would otherwise pay for lazily-initialised numpy machinery and
+    # the Porter stemmer's caches.
+    retrieve("covid-19 transmission", 10)
 
 
 def retrieve(query: str, k: int = 10) -> List[Tuple[str, float]]:
@@ -89,4 +115,5 @@ def retrieve(query: str, k: int = 10) -> List[Tuple[str, float]]:
             "manually, do the same."
         )
 
-    return bm25.score(query, k, k1=BM25_K1, b=BM25_B, delta=BM25_DELTA)
+    return custom_scorer.score(query, k, lam=BLEND_LAMBDA, k1=BM25_K1,
+                               b=BM25_B, delta=BM25_DELTA)
