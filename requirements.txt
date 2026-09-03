@@ -6,6 +6,13 @@ nltk>=3.8
 # vectorized BM25/VSM scoring). Explicitly permitted by the assignment.
 numpy>=1.26
 
+# Required to run submission/setup.py, which builds the optional C++
+# tokenizer extension. Listed explicitly because Python 3.12 removed
+# setuptools from ensurepip: a fresh 3.12 environment (the grading image
+# and the CI runner are both 3.12) has pip but *not* setuptools, so
+# without this line `python setup.py build_ext` dies on the import.
+setuptools>=68
+
 # Available if you want to compile part of your submission as a C/C++
 # extension (e.g. via Cython) for the efficiency / index-size leaderboard
 # components — see docs/SUBMISSION_INTERFACE.md, "Compiled extensions".
